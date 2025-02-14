@@ -104,6 +104,12 @@ enum Commands {
         watch_serial: bool,
         /// Path to the firmware file to flash
         path: String,
+        /// Address of an optional Serial Number
+        #[arg(long, value_parser = parse_number)]
+        serial_address: Option<u32>,
+        /// Value of an optional Serial Number
+        #[arg(long, value_parser = parse_number)]
+        serial_value: Option<u32>,
     },
     /// Unlock flash
     Unprotect {},
@@ -171,6 +177,18 @@ impl SdiPrint {
     pub fn is_enable(&self) -> bool {
         *self == SdiPrint::Enable
     }
+}
+
+fn update_serial_number(data: &mut Vec<u8>, address: u32, value: u32) {
+    data[address as usize] = (value >> 24) as u8;
+    data[(address + 1) as usize] = (value >> 16) as u8;
+    data[(address + 2) as usize] = (value >> 8) as u8;
+    data[(address + 3) as usize] = (value) as u8;
+    log::info!(
+        "updating serial_number @0x{:08x} to value: 0x{:08x}",
+        address,
+        value
+    );
 }
 
 fn main() -> Result<()> {
@@ -320,6 +338,8 @@ fn main() -> Result<()> {
                     path,
                     enable_sdi_print,
                     watch_serial,
+                    serial_address,
+                    serial_value,
                 } => {
                     sess.dump_info()?;
 
@@ -331,10 +351,15 @@ fn main() -> Result<()> {
                     let firmware = read_firmware_from_file(path)?;
 
                     match firmware {
-                        Firmware::Binary(data) => {
+                        Firmware::Binary(mut data) => {
                             let start_address =
                                 address.unwrap_or_else(|| sess.chip_family.code_flash_start());
                             log::info!("Flashing {} bytes to 0x{:08x}", data.len(), start_address);
+                            if let Some(s_addr) = serial_address {
+                                if let Some(s_val) = serial_value {
+                                    update_serial_number(&mut data, s_addr, s_val);
+                                }
+                            }
                             sess.write_flash(&data, start_address)?;
                         }
                         Firmware::Sections(sections) => {
@@ -342,7 +367,7 @@ fn main() -> Result<()> {
                             if address.is_some() {
                                 log::warn!("--address is ignored when flashing ELF or ihex");
                             }
-                            for section in sections {
+                            for mut section in sections {
                                 let start_address =
                                     sess.chip_family.fix_code_flash_start(section.address);
                                 log::info!(
@@ -350,6 +375,16 @@ fn main() -> Result<()> {
                                     section.data.len(),
                                     start_address
                                 );
+                                if let Some(s_addr) = serial_address {
+                                    if let Some(s_val) = serial_value {
+                                        if start_address >= s_addr
+                                            && ((s_addr as usize)
+                                                <= (start_address as usize) + section.data.len())
+                                        {
+                                            update_serial_number(&mut section.data, s_addr, s_val);
+                                        }
+                                    }
+                                }
                                 sess.write_flash(&section.data, start_address)?;
                             }
                         }
